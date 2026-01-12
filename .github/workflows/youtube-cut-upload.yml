@@ -1,0 +1,78 @@
+name: YouTube Cut & Upload to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "YouTube URL"
+        required: true
+        type: string
+      time_ranges:
+        description: "Time ranges (HH:MM:SS - HH:MM:SS, multiple separated by comma)"
+        required: true
+        type: string
+      drive_folder:
+        description: "Google Drive folder path (optional)"
+        required: false
+        default: "youtube_cuts"
+        type: string
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip
+          pip3 install yt-dlp
+
+      - name: Setup rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${RCLONE_CONFIG}" > ~/.config/rclone/rclone.conf
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Download YouTube video (best quality)
+        run: |
+          yt-dlp \
+            -f "bv*+ba/b" \
+            --merge-output-format mp4 \
+            -o "source.%(ext)s" \
+            "${{ github.event.inputs.youtube_url }}"
+
+      - name: Cut video into segments (named by time)
+        run: |
+          mkdir -p cuts
+          IFS=',' read -ra SEGMENTS <<< "${{ github.event.inputs.time_ranges }}"
+
+          for seg in "${SEGMENTS[@]}"; do
+            START=$(echo "$seg" | awk -F'-' '{print $1}' | xargs)
+            END=$(echo "$seg" | awk -F'-' '{print $2}' | xargs)
+
+            SAFE_START=$(echo "$START" | tr ':' '-')
+            SAFE_END=$(echo "$END" | tr ':' '-')
+
+            OUTPUT="cuts/clip_${SAFE_START}_to_${SAFE_END}.mp4"
+
+            echo "Cutting $START -> $END as $OUTPUT"
+
+            ffmpeg -y \
+              -i source.mp4 \
+              -ss "$START" \
+              -to "$END" \
+              -c copy \
+              "$OUTPUT"
+          done
+
+
+      - name: Upload clips to Google Drive
+        run: |
+          rclone copy cuts divagd:${{ github.event.inputs.drive_folder }} \
+            --progress \
+            --create-empty-src-dirs
